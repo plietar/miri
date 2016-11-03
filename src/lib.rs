@@ -1,5 +1,6 @@
 #![feature(
     btree_range,
+    cell_extras,
     collections,
     collections_bound,
     rustc_private,

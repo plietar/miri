@@ -11,13 +11,12 @@ use super::{
     Global,
 };
 use error::EvalResult;
-use rustc::mir::repr as mir;
+use rustc::mir;
 use rustc::ty::{subst, self};
 use rustc::hir::def_id::DefId;
 use rustc::hir;
 use rustc::mir::visit::{Visitor, LvalueContext};
 use syntax::codemap::Span;
-use std::rc::Rc;
 
 impl<'a, 'tcx> EvalContext<'a, 'tcx> {
     /// Returns true as long as there are more things to do.
@@ -38,7 +37,7 @@ impl<'a, 'tcx> EvalContext<'a, 'tcx> {
                 substs: self.substs(),
                 def_id: self.frame().def_id,
                 ecx: self,
-                mir: &mir,
+                mir: CachedMir::clone(&mir),
                 new_constants: &mut new,
             }.visit_statement(block, stmt, mir::Location {
                 block: block,
@@ -59,7 +58,7 @@ impl<'a, 'tcx> EvalContext<'a, 'tcx> {
             substs: self.substs(),
             def_id: self.frame().def_id,
             ecx: self,
-            mir: &mir,
+            mir: CachedMir::clone(&mir),
             new_constants: &mut new,
         }.visit_terminator(block, terminator, mir::Location {
             block: block,
@@ -76,7 +75,7 @@ impl<'a, 'tcx> EvalContext<'a, 'tcx> {
     fn statement(&mut self, stmt: &mir::Statement<'tcx>) -> EvalResult<'tcx, ()> {
         trace!("{:?}", stmt);
 
-        use rustc::mir::repr::StatementKind::*;
+        use rustc::mir::StatementKind::*;
         match stmt.kind {
             Assign(ref lvalue, ref rvalue) => self.eval_rvalue_into_lvalue(rvalue, lvalue)?,
             SetDiscriminant { .. } => unimplemented!(),
@@ -110,7 +109,7 @@ impl<'a, 'tcx> EvalContext<'a, 'tcx> {
 struct ConstantExtractor<'a, 'b: 'a, 'tcx: 'b> {
     span: Span,
     ecx: &'a mut EvalContext<'b, 'tcx>,
-    mir: &'a mir::Mir<'tcx>,
+    mir: CachedMir<'tcx>,
     def_id: DefId,
     substs: &'tcx subst::Substs<'tcx>,
     new_constants: &'a mut EvalResult<'tcx, u64>,
@@ -165,7 +164,8 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for ConstantExtractor<'a, 'b, 'tcx> {
                 }
             },
             mir::Literal::Promoted { index } => {
-                let mir = self.mir.promoted[index].clone();
+                let mir = CachedMir::map(CachedMir::clone(&self.mir), |mir| &mir.promoted[index]);
+
                 let cid = GlobalId {
                     def_id: self.def_id,
                     substs: self.substs,
@@ -174,8 +174,7 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for ConstantExtractor<'a, 'b, 'tcx> {
                 if self.ecx.globals.contains_key(&cid) {
                     return;
                 }
-                self.try(|this| {
-                    let mir = CachedMir::Owned(Rc::new(mir));
+                self.try(move |this| {
                     let ty = this.ecx.monomorphize(mir.return_ty, this.substs);
                     this.ecx.globals.insert(cid, Global::uninitialized(ty));
                     this.ecx.push_stack_frame(this.def_id,
@@ -197,7 +196,7 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for ConstantExtractor<'a, 'b, 'tcx> {
     ) {
         self.super_lvalue(lvalue, context, location);
         if let mir::Lvalue::Static(def_id) = *lvalue {
-            let substs = subst::Substs::empty(self.ecx.tcx);
+            let substs = subst::Substs::empty();
             let span = self.span;
             if let Some(node_item) = self.ecx.tcx.map.get_if_local(def_id) {
                 if let hir::map::Node::NodeItem(&hir::Item { ref node, .. }) = node_item {
